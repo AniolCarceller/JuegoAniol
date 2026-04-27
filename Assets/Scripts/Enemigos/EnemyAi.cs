@@ -62,7 +62,7 @@ public class EnemyAI : MonoBehaviour
         timerAtaque -= Time.deltaTime;
 
         // ═══════════════════════════════
-        // ¿Lo he golpeado (al jugador)?
+        // ¿Fue golpeado?
         // ═══════════════════════════════
         if (fueGolpeado)
         {
@@ -70,27 +70,25 @@ public class EnemyAI : MonoBehaviour
 
             if (elementoEfectivo)
             {
-                // Recibir daño — ya aplicado en RecibirDaño()
                 CambiarEstado(EstadoEnemigo.BeingHit);
                 Invoke(nameof(VolverDeGolpe), 0.2f);
             }
             else
             {
-                // No recibir daño → reacción inefectiva
                 ReaccionInefectiva();
             }
             return;
         }
 
         // ═══════════════════════════════
-        // NO fue golpeado → lógica normal
+        // Lógica normal de estados
         // ═══════════════════════════════
         switch (estado)
         {
-            case EstadoEnemigo.Wander:   EstadoWander();   break;
-            case EstadoEnemigo.ChasePlayer: EstadoChase(); break;
-            case EstadoEnemigo.Attack:   EstadoAtaque();   break;
-            case EstadoEnemigo.Idle:     EstadoIdle();     break;
+            case EstadoEnemigo.Wander:      EstadoWander();   break;
+            case EstadoEnemigo.ChasePlayer: EstadoChase();    break;
+            case EstadoEnemigo.Attack:      EstadoAtaque();   break;
+            case EstadoEnemigo.Idle:        EstadoIdle();     break;
         }
 
         // Comprobar visión desde cualquier estado excepto Attack y Death
@@ -111,9 +109,11 @@ public class EnemyAI : MonoBehaviour
 
     void EstadoWander()
     {
+        // FIX: guardar antes de consultar remainingDistance
+        if (!agente.isActiveAndEnabled || !agente.isOnNavMesh) return;
+
         if (agente.remainingDistance < 0.5f)
         {
-            // Pausa breve antes de ir al siguiente punto
             timerIdle = Random.Range(1f, 2.5f);
             CambiarEstado(EstadoEnemigo.Idle);
         }
@@ -123,17 +123,18 @@ public class EnemyAI : MonoBehaviour
     {
         if (jugador == null) return;
 
-        agente.SetDestination(jugador.position);
+        // FIX: guardar antes de SetDestination
+        if (agente.isActiveAndEnabled && agente.isOnNavMesh)
+            agente.SetDestination(jugador.position);
+
         float distancia = Vector3.Distance(transform.position, jugador.position);
 
-        // En rango → atacar
         if (distancia <= rangoAtaque)
         {
             CambiarEstado(EstadoEnemigo.Attack);
             return;
         }
 
-        // Jugador se alejó demasiado → volver a wander
         if (distancia > rangoDeteccion * 1.5f)
             CambiarEstado(EstadoEnemigo.Wander);
     }
@@ -142,19 +143,20 @@ public class EnemyAI : MonoBehaviour
     {
         if (jugador == null) return;
 
-        agente.SetDestination(transform.position); // No moverse
+        // FIX: guardar antes de SetDestination
+        if (agente.isActiveAndEnabled && agente.isOnNavMesh)
+            agente.SetDestination(transform.position);
+
         transform.LookAt(jugador);
 
         float distancia = Vector3.Distance(transform.position, jugador.position);
 
-        // Jugador se alejó → chase
         if (distancia > rangoAtaque * 1.2f)
         {
             CambiarEstado(EstadoEnemigo.ChasePlayer);
             return;
         }
 
-        // Atacar si el cooldown lo permite
         if (timerAtaque <= 0f)
         {
             AtacarJugador();
@@ -173,7 +175,6 @@ public class EnemyAI : MonoBehaviour
         float distancia = Vector3.Distance(transform.position, jugador.position);
         if (distancia > rangoDeteccion) return;
 
-        // Raycast para comprobar que no hay obstáculos
         Vector3 dir = (jugador.position - transform.position).normalized;
         if (Physics.Raycast(transform.position + Vector3.up, dir, out RaycastHit hit, rangoDeteccion))
         {
@@ -193,7 +194,6 @@ public class EnemyAI : MonoBehaviour
         Debug.Log($"{gameObject.name} ataca por {daño}");
     }
 
-    // Llamado desde JugadorCombate cuando dispara a este enemigo
     public void RecibirDaño(float cantidad, TipoRecurso recurso)
     {
         if (estado == EstadoEnemigo.Death) return;
@@ -242,8 +242,12 @@ public class EnemyAI : MonoBehaviour
         {
             case EstadoEnemigo.Wander:
                 agente.speed = velocidadNormal;
-                puntoWander = ObtenerPuntoAleatorio();
-                agente.SetDestination(puntoWander);
+                // FIX: solo llamar SetDestination si el agente ya está en el NavMesh
+                if (agente.isActiveAndEnabled && agente.isOnNavMesh)
+                {
+                    puntoWander = ObtenerPuntoAleatorio();
+                    agente.SetDestination(puntoWander);
+                }
                 break;
             case EstadoEnemigo.ChasePlayer:
                 agente.speed = velocidadPersecucion;
