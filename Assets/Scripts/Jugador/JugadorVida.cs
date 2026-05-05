@@ -47,7 +47,7 @@ public class JugadorVida : MonoBehaviour
     {
         if (estado == EstadoJugador.Muerto) return;
 
-        estado = EstadoJugador.Electrocutado;
+        estado             = EstadoJugador.Electrocutado;
         timerElectrocucion = duracionElectrocucion;
         RecibirDaño(20f);
         Debug.Log("¡Electrocutado!");

@@ -11,8 +11,10 @@ public class EspirituFuego : EnemyAI
     protected override bool EsEfectivo(TipoRecurso recurso)
         => recurso == TipoRecurso.Agua;
 
+    // Arena contra fuego: sin efecto, solo humo (aquí puedes lanzar partículas)
     protected override void ReaccionInefectiva()
     {
-        Debug.Log("Arena contra fuego — sin efecto, genera humo");
+        Debug.Log($"[{gameObject.name}] Arena contra fuego — sin efecto");
+        // TODO: activar partículas de humo
     }
 }

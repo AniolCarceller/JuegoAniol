@@ -1,193 +1,271 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
 
-/// <summary>
-/// Gestiona el combate del jugador: disparo de agua/arena,
-/// cambio de recurso e impulso vertical de agua.
-/// Requiere GestorRecursos y PlayerMovement en el mismo GameObject.
-/// </summary>
 [RequireComponent(typeof(GestorRecursos))]
 [RequireComponent(typeof(PlayerMovement))]
+[RequireComponent(typeof(PlayerInput))]
 public class JugadorCombate : MonoBehaviour
 {
-    // ══════════════════════════════════════════
-    // CONFIGURACIÓN
-    // ══════════════════════════════════════════
-
     [Header("Disparo")]
     public float rangoDisparo      = 15f;
-    public float dañoPorSegundo    = 20f;   // Daño continuo mientras disparas
-    public float consumoPorSegundo = 15f;   // Recurso consumido por segundo al disparar
-    public LayerMask capaObjetivos;         // Capas que puede golpear (Enemy, Foco…)
+    public float dañoPorSegundo    = 20f;
+    public float consumoPorSegundo = 15f;
 
-    [Header("Impulso de agua")]
-    [Tooltip("Ángulo mínimo mirando hacia abajo para activar impulso (0=recto, 90=suelo)")]
-    public float anguloImpulso = 50f;       // Si la cámara apunta más abajo de esto → impulso
+    [Header("Punto de salida del chorro")]
+    [Tooltip("Asigna aquí un empty child del personaje (p.ej. la boquilla del FLUDD). Si no asignas nada usa el centro del jugador.")]
+    public Transform puntoSalida;
 
-    [Header("Feedback visual (opcional)")]
-    public ParticleSystem particulasDisparo;   // Arrastra el sistema de partículas de la manguera
+    [Header("Visual del chorro")]
+    public float anchoChorroInicio = 0.12f;
+    public float anchoChorroFin    = 0.04f;
+    public int   segmentosChorro   = 12;
+    public float amplitudOnda      = 0.06f;
 
-    // ══════════════════════════════════════════
-    // ESTADO
-    // ══════════════════════════════════════════
+    [Header("Impacto")]
+    public float radioAnilloImpacto = 0.35f;
+
+    [Header("Partículas")]
+    public ParticleSystem particulasDisparo;
+    public ParticleSystem particulasImpacto;
 
     [Header("Debug")]
     [SerializeField] private TipoRecurso recursoActual = TipoRecurso.Agua;
-    [SerializeField] private bool disparando = false;
-
-    // ══════════════════════════════════════════
-    // REFERENCIAS
-    // ══════════════════════════════════════════
+    [SerializeField] private bool disparando           = false;
+    [SerializeField] private bool impulsoMantenido     = false;
+    [SerializeField] private string ultimoGolpe        = "ninguno";
 
     private GestorRecursos gestorRecursos;
     private PlayerMovement playerMovement;
-    private Transform camara;
+    private PlayerInput    playerInput;
 
-    // ══════════════════════════════════════════
-    // INICIALIZACIÓN
-    // ══════════════════════════════════════════
+    private InputAction shootAction;
+    private InputAction impulseAction;
+    private InputAction switchResourceAction;
 
-    void Start()
+    private LineRenderer lineaChorro;
+    private LineRenderer anilloImpacto;
+
+    private bool    hayImpacto    = false;
+    private Vector3 puntoImpacto  = Vector3.zero;
+    private Vector3 normalImpacto = Vector3.up;
+
+    void Awake()
     {
         gestorRecursos = GetComponent<GestorRecursos>();
         playerMovement = GetComponent<PlayerMovement>();
-        camara         = Camera.main.transform;
+        playerInput    = GetComponent<PlayerInput>();
     }
 
-    // ══════════════════════════════════════════
-    // INPUT CALLBACKS (Input System)
-    // ══════════════════════════════════════════
-
-    /// <summary>Disparar — mantener pulsado para chorro continuo.</summary>
-    public void OnShoot(InputValue value)
+    void Start()
     {
-        disparando = value.isPressed;
-
-        if (disparando)
-            IniciarDisparo();
-        else
-            DetenerDisparo();
-    }
-
-    /// <summary>Cambiar entre Agua y Arena.</summary>
-    public void OnSwitchResource(InputValue value)
-    {
-        if (!value.isPressed) return;
-
-        recursoActual = (recursoActual == TipoRecurso.Agua)
-            ? TipoRecurso.Arena
-            : TipoRecurso.Agua;
-
-        Debug.Log($"Recurso activo: {recursoActual}");
-    }
-
-    /// <summary>Impulso de agua manual (botón dedicado).</summary>
-    public void OnImpulso(InputValue value)
-    {
-        if (!value.isPressed) return;
-        IntentarImpulsoAgua();
-    }
-
-    // ══════════════════════════════════════════
-    // UPDATE — chorro continuo
-    // ══════════════════════════════════════════
-
-    void Update()
-    {
-        if (!disparando) return;
-
-        float cantidad = consumoPorSegundo * Time.deltaTime;
-
-        // Verificar que hay recurso disponible
-        if (!gestorRecursos.Consumir(recursoActual, cantidad))
+        if (Camera.main == null)
         {
-            // Sin recurso → cortar disparo
-            DetenerDisparo();
-            disparando = false;
+            Debug.LogError("[JugadorCombate] No hay cámara con tag MainCamera.");
+            enabled = false;
             return;
         }
 
-        // Comprobar si la cámara apunta hacia abajo → impulso automático
-        if (recursoActual == TipoRecurso.Agua && MirandoHaciaAbajo())
-        {
-            IntentarImpulsoAgua();
-            return; // El agua se usa en el impulso, no en el raycast
-        }
+        if (puntoSalida == null)
+            puntoSalida = transform;
 
-        // Raycast de disparo
-        Ray rayo = new Ray(camara.position, camara.forward);
-        if (Physics.Raycast(rayo, out RaycastHit golpe, rangoDisparo, capaObjetivos))
-        {
-            AplicarDaño(golpe, dañoPorSegundo * Time.deltaTime);
-        }
+        shootAction          = playerInput.actions.FindAction("Shoot",          true);
+        impulseAction        = playerInput.actions.FindAction("Impulso",        true);
+        switchResourceAction = playerInput.actions.FindAction("SwitchResource", true);
 
-        // Línea de debug en escena
-        Debug.DrawRay(camara.position, camara.forward * rangoDisparo,
-                      recursoActual == TipoRecurso.Agua ? Color.blue : Color.yellow);
+        InicializarLineaChorro();
+        InicializarAnilloImpacto();
     }
 
-    // ══════════════════════════════════════════
-    // LÓGICA DE DISPARO
-    // ══════════════════════════════════════════
-
-    void IniciarDisparo()
+    void InicializarLineaChorro()
     {
+        lineaChorro = gameObject.AddComponent<LineRenderer>();
+        lineaChorro.positionCount     = segmentosChorro;
+        lineaChorro.startWidth        = anchoChorroInicio;
+        lineaChorro.endWidth          = anchoChorroFin;
+        lineaChorro.useWorldSpace     = true;
+        lineaChorro.numCapVertices    = 4;
+        lineaChorro.numCornerVertices = 2;
+        lineaChorro.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        lineaChorro.receiveShadows    = false;
+
+        Shader shader = Shader.Find("Sprites/Default")
+                     ?? Shader.Find("Unlit/Color")
+                     ?? Shader.Find("Hidden/Internal-Colored");
+        if (shader != null) lineaChorro.material = new Material(shader);
+
+        lineaChorro.enabled = false;
+    }
+
+    void InicializarAnilloImpacto()
+    {
+        GameObject goAnillo = new GameObject("AnilloImpacto");
+        goAnillo.transform.SetParent(transform);
+
+        anilloImpacto = goAnillo.AddComponent<LineRenderer>();
+        anilloImpacto.positionCount     = 17;
+        anilloImpacto.startWidth        = 0.04f;
+        anilloImpacto.endWidth          = 0.04f;
+        anilloImpacto.useWorldSpace     = true;
+        anilloImpacto.loop              = false;
+        anilloImpacto.numCapVertices    = 4;
+        anilloImpacto.numCornerVertices = 2;
+        anilloImpacto.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        anilloImpacto.receiveShadows    = false;
+
+        Shader shader = Shader.Find("Sprites/Default")
+                     ?? Shader.Find("Unlit/Color")
+                     ?? Shader.Find("Hidden/Internal-Colored");
+        if (shader != null) anilloImpacto.material = new Material(shader);
+
+        anilloImpacto.enabled = false;
+    }
+
+    void Update()
+    {
+        bool shootHeld   = shootAction   != null && shootAction.IsPressed();
+        impulsoMantenido = impulseAction != null && impulseAction.IsPressed();
+
+        if (switchResourceAction != null && switchResourceAction.WasPressedThisFrame())
+        {
+            recursoActual = (recursoActual == TipoRecurso.Agua) ? TipoRecurso.Arena : TipoRecurso.Agua;
+            Debug.Log($"Recurso: {recursoActual}");
+        }
+
+        if (playerMovement != null)
+        {
+            playerMovement.SetDisparando(shootHeld);
+            playerMovement.SetImpulsoMantenido(impulsoMantenido && recursoActual == TipoRecurso.Agua);
+        }
+
+        if (!shootHeld)
+        {
+            PararDisparo();
+            return;
+        }
+
+        if (!gestorRecursos.Consumir(recursoActual, consumoPorSegundo * Time.deltaTime))
+        {
+            PararDisparo();
+            return;
+        }
+
+        disparando = true;
         if (particulasDisparo != null && !particulasDisparo.isPlaying)
             particulasDisparo.Play();
+
+        // El chorro sale desde puntoSalida hacia donde mira el personaje (transform.forward).
+        // PlayerMovement ya giró al personaje hacia la cámara si estaba quieto,
+        // así que transform.forward siempre coincide con la intención del jugador.
+        Vector3 origen    = puntoSalida.position;
+        Vector3 direccion = transform.forward;
+
+        bool golpeado = Physics.Raycast(origen, direccion, out RaycastHit golpe, rangoDisparo);
+
+        Vector3 fin   = golpeado ? golpe.point : origen + direccion * rangoDisparo;
+        ultimoGolpe   = golpeado ? golpe.collider.gameObject.name : "—";
+        hayImpacto    = true;
+        puntoImpacto  = fin;
+        normalImpacto = golpeado ? golpe.normal : -direccion;
+
+        DibujarChorro(origen, fin);
+        DibujarAnilloImpacto();
+
+        if (particulasImpacto != null)
+        {
+            particulasImpacto.transform.position = fin;
+            if (golpeado) { if (!particulasImpacto.isPlaying) particulasImpacto.Play(); }
+            else          { if (particulasImpacto.isPlaying)  particulasImpacto.Stop(); }
+        }
+
+        if (golpeado)
+            AplicarDaño(golpe, dañoPorSegundo * Time.deltaTime);
     }
 
-    void DetenerDisparo()
+    void PararDisparo()
     {
-        if (particulasDisparo != null && particulasDisparo.isPlaying)
-            particulasDisparo.Stop();
+        disparando            = false;
+        hayImpacto            = false;
+        lineaChorro.enabled   = false;
+        anilloImpacto.enabled = false;
+        if (particulasDisparo != null && particulasDisparo.isPlaying) particulasDisparo.Stop();
+        if (particulasImpacto != null && particulasImpacto.isPlaying) particulasImpacto.Stop();
+    }
+
+    void DibujarChorro(Vector3 inicio, Vector3 fin)
+    {
+        lineaChorro.positionCount = segmentosChorro;
+        lineaChorro.enabled       = true;
+
+        Color colorBase = (recursoActual == TipoRecurso.Agua)
+            ? new Color(0.15f, 0.65f, 1.0f, 0.90f)
+            : new Color(0.95f, 0.80f, 0.20f, 0.90f);
+
+        lineaChorro.startColor = colorBase;
+        lineaChorro.endColor   = new Color(colorBase.r, colorBase.g, colorBase.b, 0.3f);
+
+        float pulso = 1f + Mathf.Sin(Time.time * 25f) * 0.12f;
+        lineaChorro.startWidth = anchoChorroInicio * pulso;
+        lineaChorro.endWidth   = anchoChorroFin;
+
+        Vector3 dir  = (fin - inicio).normalized;
+        Vector3 perp = Vector3.Cross(dir, Vector3.up);
+        if (perp.sqrMagnitude < 0.001f) perp = Vector3.Cross(dir, Vector3.right);
+        perp.Normalize();
+
+        for (int i = 0; i < segmentosChorro; i++)
+        {
+            float t    = (float)i / (segmentosChorro - 1);
+            Vector3 p  = Vector3.Lerp(inicio, fin, t);
+            float onda = Mathf.Sin(t * Mathf.PI * 4f + Time.time * 22f) * amplitudOnda * (1f - t * 0.6f);
+            lineaChorro.SetPosition(i, p + perp * onda);
+        }
+    }
+
+    void DibujarAnilloImpacto()
+    {
+        if (!hayImpacto) { anilloImpacto.enabled = false; return; }
+
+        anilloImpacto.enabled = true;
+
+        Color colorAnillo = (recursoActual == TipoRecurso.Agua)
+            ? new Color(0.3f, 0.85f, 1.0f, 0.95f)
+            : new Color(1.0f, 0.90f, 0.3f, 0.95f);
+
+        anilloImpacto.startColor = colorAnillo;
+        anilloImpacto.endColor   = new Color(colorAnillo.r, colorAnillo.g, colorAnillo.b, 0.5f);
+
+        float   pulso      = radioAnilloImpacto + Mathf.Sin(Time.time * 18f) * 0.07f;
+        Vector3 normal     = normalImpacto.normalized;
+        Vector3 tangente   = Vector3.Cross(normal, Vector3.up);
+        if (tangente.sqrMagnitude < 0.001f) tangente = Vector3.Cross(normal, Vector3.forward);
+        tangente.Normalize();
+        Vector3 bitangente = Vector3.Cross(normal, tangente).normalized;
+        Vector3 centro     = puntoImpacto + normal * 0.01f;
+
+        int puntos = anilloImpacto.positionCount;
+        for (int i = 0; i < puntos; i++)
+        {
+            float angulo = (float)i / (puntos - 1) * Mathf.PI * 2f;
+            anilloImpacto.SetPosition(i,
+                centro
+                + tangente   * Mathf.Cos(angulo) * pulso
+                + bitangente * Mathf.Sin(angulo) * pulso);
+        }
     }
 
     void AplicarDaño(RaycastHit golpe, float daño)
     {
-        // ¿Es un enemigo?
         EnemyAI enemigo = golpe.collider.GetComponent<EnemyAI>();
-        if (enemigo != null)
-        {
-            enemigo.RecibirDaño(daño, recursoActual);
-            return;
-        }
+        if (enemigo != null) { enemigo.RecibirDaño(daño, recursoActual); return; }
 
-        // ¿Es un foco de incendio?
         FocoIncendio foco = golpe.collider.GetComponent<FocoIncendio>();
-        if (foco != null)
-        {
-            foco.RecibirDaño(daño, recursoActual);
-        }
+        if (foco != null) foco.RecibirDaño(daño, recursoActual);
     }
-
-    // ══════════════════════════════════════════
-    // IMPULSO DE AGUA
-    // ══════════════════════════════════════════
-
-    void IntentarImpulsoAgua()
-    {
-        if (recursoActual != TipoRecurso.Agua) return;
-
-        // PlayerMovement consume el agua y aplica la fuerza
-        playerMovement.ActivarImpulsoAgua();
-    }
-
-    bool MirandoHaciaAbajo()
-    {
-        // camara.forward.y va de -1 (suelo) a 1 (cielo)
-        // Si el ángulo es menor a -anguloImpulso grados → mirando abajo
-        float angulo = Vector3.Angle(Vector3.down, camara.forward);
-        return angulo < anguloImpulso;
-    }
-
-    // ══════════════════════════════════════════
-    // DEBUG EN PANTALLA
-    // ══════════════════════════════════════════
 
     void OnGUI()
     {
-        string icono   = recursoActual == TipoRecurso.Agua ? "💧" : "🟡";
-        string recurso = recursoActual == TipoRecurso.Agua ? "Agua" : "Arena";
-        GUI.Label(new Rect(20, 120, 250, 25), $"{icono} Disparando: {recurso}  [{(disparando ? "ON" : "off")}]");
+        string icono = recursoActual == TipoRecurso.Agua ? "💧" : "🟡";
+        GUI.Label(new Rect(20, 120, 360, 25), $"{icono} {recursoActual} | Disparando: {(disparando ? "SÍ" : "no")} | Propulsión: {(impulsoMantenido ? "SÍ" : "no")}");
+        GUI.Label(new Rect(20, 145, 360, 25), $"Apuntando a: {ultimoGolpe}");
     }
 }

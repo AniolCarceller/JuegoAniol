@@ -38,11 +38,10 @@ public class GestorRecursos : MonoBehaviour
 
     public void RecargarTodo()
     {
-        aguaActual = aguaMaxima;
+        aguaActual  = aguaMaxima;
         arenaActual = arenaMaxima;
     }
 
-    // Debug visual en pantalla
     void OnGUI()
     {
         GUI.Label(new Rect(20, 20, 200, 25), $"💧 Agua: {aguaActual:F0} / {aguaMaxima}");

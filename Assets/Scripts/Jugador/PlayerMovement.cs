@@ -2,221 +2,215 @@ using UnityEngine;
 using UnityEngine.InputSystem;
 
 [RequireComponent(typeof(CharacterController))]
+[RequireComponent(typeof(PlayerInput))]
+[RequireComponent(typeof(GestorRecursos))]
 public class PlayerMovement : MonoBehaviour
 {
-    // ══════════════════════════════════════════
-    // MOVIMIENTO
-    // ══════════════════════════════════════════
+    [Header("Cámara")]
+    [Tooltip("Arrastra aquí la Main Camera (la que tiene CinemachineBrain).")]
+    public Transform camaraTransform;
+
     [Header("Velocidad")]
-    public float velocidadAndar   = 5f;
-    public float velocidadCorrer  = 9f;
-    public float aceleracion      = 15f;   // Qué tan rápido llega a la velocidad objetivo
-    public float deceleracion     = 20f;   // Qué tan rápido frena al soltar el stick
+    public float velocidadAndar      = 9f;    // +3 — respuesta inmediata al caminar
+    public float velocidadCorrer     = 16f;   // +4 — sprint se nota de verdad
+    public float tasaCambioVelocidad = 18f;   // aceleración muy rápida, sin inercia molesta
 
-    // ══════════════════════════════════════════
-    // SALTO
-    // ══════════════════════════════════════════
-    [Header("Salto")]
-    public float alturaMaximaSalto  = 2.5f;  // Altura si mantienes pulsado
-    public float alturaMinimaSalto  = 0.8f;  // Altura si sueltas enseguida
-    public float gravedad           = -25f;
-    public float gravedad_Caida     = -40f;  // Caída más rápida para feel de peso
-    [Tooltip("Segundos de gracia para saltar al caer de un borde")]
-    public float tiempoCoyote       = 0.12f;
-    [Tooltip("Segundos de buffer para el botón de salto")]
-    public float bufferSalto        = 0.12f;
+    [Header("Rotación del personaje")]
+    [Range(0f, 0.3f)]
+    public float suavizadoRotacion = 0.06f;   // más ágil al girar
 
-    // ══════════════════════════════════════════
-    // IMPULSO DE AGUA (Mario Sunshine style)
-    // ══════════════════════════════════════════
-    [Header("Impulso de agua")]
-    public float fuerzaImpulsoAgua  = 14f;
-    public float aguaPorImpulso     = 10f;   // Agua que consume cada impulso
-    [HideInInspector] public bool impulsoActivo = false; // Lo activa JugadorCombate
+    [Header("Salto y Gravedad")]
+    public float alturasSalto = 5f;    // salto alto tipo Mario
+    public float gravedad     = -35f;  // caída rápida y contundente
+    public float timeoutSalto = 0.50f;
+    public float timeoutCaida = 0.15f;
 
-    // ══════════════════════════════════════════
-    // PRIVADOS
-    // ══════════════════════════════════════════
+    [Header("Suelo")]
+    public bool      enSuelo     = true;
+    public float     offsetSuelo = -0.14f;
+    public float     radioSuelo  = 0.28f;
+    public LayerMask capasSuelo;
+
+    [Header("Impulso agua")]
+    public float fuerzaImpulso = 28f;   // propulsión potente tipo FLUDD
+    public float consumoAgua   = 30f;
+
     private CharacterController controller;
-    private Transform camara;
-    private GestorRecursos gestorRecursos;
-    private TerceraPersonaCamara camaraScript;
+    private GestorRecursos       recursos;
+    private PlayerInput          playerInput;
 
-    // Velocidad horizontal real (acumulada suavemente)
-    private Vector3 velocidadHorizontal = Vector3.zero;
-    private float   velocidadVertical   = 0f;
+    private InputAction moveAction;
+    private InputAction jumpAction;
+    private InputAction sprintAction;
 
-    // Coyote time
-    private float timerCoyote = 0f;
-    private bool  enSueloFrame = false;
+    private float _speed;
+    private float _rotationVelocity;
+    private float _verticalVelocity;
+    private const float _terminalVelocity = 53f;
 
-    // Buffer de salto
-    private float timerBufferSalto = 0f;
+    private float _jumpTimeoutDelta;
+    private float _fallTimeoutDelta;
 
-    // Salto variable
-    private bool  saltandoArriba = false;   // Sigue subiendo y el botón está pulsado
+    private bool impulsoActivo    = false;
+    private bool disparandoActivo = false;
 
-    // Input crudo
-    private Vector2 inputMovimiento;
-    private bool    botonSalto       = false;
-    private bool    botonSaltoSuelto = false;  // Flanco de bajada
-    private bool    corriendo        = false;
+    void Awake()
+    {
+        controller  = GetComponent<CharacterController>();
+        recursos    = GetComponent<GestorRecursos>();
+        playerInput = GetComponent<PlayerInput>();
+    }
 
-    // ══════════════════════════════════════════
-    // INICIALIZACIÓN
-    // ══════════════════════════════════════════
     void Start()
     {
-        controller       = GetComponent<CharacterController>();
-        camara           = Camera.main.transform;
-        camaraScript     = Camera.main.GetComponent<TerceraPersonaCamara>();
-        gestorRecursos   = GetComponent<GestorRecursos>();
-        Cursor.lockState = CursorLockMode.Locked;
+        if (camaraTransform == null)
+        {
+            if (Camera.main != null)
+                camaraTransform = Camera.main.transform;
+            else
+            {
+                Debug.LogError("[PlayerMovement] Asigna la Main Camera al campo 'Camara Transform'.");
+                enabled = false;
+                return;
+            }
+        }
+
+        moveAction   = playerInput.actions.FindAction("Move",   true);
+        jumpAction   = playerInput.actions.FindAction("Jump",   true);
+        sprintAction = playerInput.actions.FindAction("Sprint", false);
+
+        moveAction.Enable();
+        jumpAction.Enable();
+        if (sprintAction != null) sprintAction.Enable();
+
+        _jumpTimeoutDelta = timeoutSalto;
+        _fallTimeoutDelta = timeoutCaida;
     }
 
-    // ── Input System callbacks ─────────────────
-    public void OnMove(InputValue value)  => inputMovimiento = value.Get<Vector2>();
-    public void OnJump(InputValue value)
-    {
-        bool pulsado = value.isPressed;
-        if (pulsado)
-        {
-            botonSalto = true;
-            timerBufferSalto = bufferSalto; // Guardar intención de salto
-        }
-        else
-        {
-            botonSalto       = false;
-            botonSaltoSuelto = true;        // Señalar que soltó (para cortar el salto)
-        }
-    }
-    public void OnSprint(InputValue value) => corriendo = value.isPressed;
-
-    // ══════════════════════════════════════════
-    // UPDATE
-    // ══════════════════════════════════════════
     void Update()
     {
-        bool enSuelo = controller.isGrounded;
+        GroundedCheck();
+        JumpAndGravity();
+        Move();
+    }
 
-        // ── Coyote time ───────────────────────
-        if (enSuelo)
+    void GroundedCheck()
+    {
+        Vector3 sphere = new Vector3(
+            transform.position.x,
+            transform.position.y - offsetSuelo,
+            transform.position.z);
+
+        enSuelo = controller.isGrounded ||
+                  Physics.CheckSphere(sphere, radioSuelo, capasSuelo, QueryTriggerInteraction.Ignore);
+    }
+
+    void Move()
+    {
+        if (camaraTransform == null) return;
+
+        Vector2 input  = moveAction.ReadValue<Vector2>();
+        bool    sprint = sprintAction != null && sprintAction.IsPressed();
+
+        float targetSpeed    = (input == Vector2.zero) ? 0f : (sprint ? velocidadCorrer : velocidadAndar);
+        float currentH       = new Vector3(controller.velocity.x, 0f, controller.velocity.z).magnitude;
+        float inputMagnitude = Mathf.Clamp01(input.magnitude);
+
+        if (Mathf.Abs(currentH - targetSpeed) > 0.1f)
         {
-            timerCoyote  = tiempoCoyote;
-            saltandoArriba = false;
-
-            if (velocidadVertical < -2f)
-                velocidadVertical = -2f;   // Pequeña fuerza hacia abajo para mantener contacto
+            _speed = Mathf.Lerp(currentH, targetSpeed * inputMagnitude, Time.deltaTime * tasaCambioVelocidad);
+            _speed = Mathf.Round(_speed * 1000f) / 1000f;
         }
         else
         {
-            timerCoyote -= Time.deltaTime;
+            _speed = targetSpeed;
         }
 
-        // ── Buffer de salto ───────────────────
-        timerBufferSalto -= Time.deltaTime;
+        Vector3 camF = camaraTransform.forward; camF.y = 0f; camF.Normalize();
+        Vector3 camR = camaraTransform.right;   camR.y = 0f; camR.Normalize();
+        Vector3 moveDir = camF * input.y + camR * input.x;
 
-        // ── ¿Puede saltar? ────────────────────
-        bool puedeUsarCoyote = timerCoyote > 0f && !enSuelo; // Cayendo pero dentro del margen
-        bool tieneBufferSalto = timerBufferSalto > 0f;
-
-        if (tieneBufferSalto && (enSuelo || puedeUsarCoyote))
+        if (disparandoActivo && input == Vector2.zero)
         {
-            Saltar(alturaMaximaSalto);
-            timerBufferSalto = 0f;
-            timerCoyote      = 0f;
+            float yawCam = camaraTransform.eulerAngles.y;
+            float rot = Mathf.SmoothDampAngle(
+                transform.eulerAngles.y, yawCam, ref _rotationVelocity, suavizadoRotacion);
+            transform.rotation = Quaternion.Euler(0f, rot, 0f);
         }
-
-        // ── Cortar salto al soltar el botón ───
-        if (botonSaltoSuelto)
+        else if (moveDir.sqrMagnitude > 0.0001f)
         {
-            botonSaltoSuelto = false;
-            if (saltandoArriba && velocidadVertical > 0f)
-            {
-                // Cortar hasta la velocidad mínima equivalente
-                float velocidadMin = Mathf.Sqrt(2f * Mathf.Abs(gravedad) * alturaMinimaSalto);
-                velocidadVertical  = Mathf.Min(velocidadVertical, velocidadMin);
-            }
+            moveDir.Normalize();
+            float targetRot = Mathf.Atan2(moveDir.x, moveDir.z) * Mathf.Rad2Deg;
+            float rot = Mathf.SmoothDampAngle(
+                transform.eulerAngles.y, targetRot, ref _rotationVelocity, suavizadoRotacion);
+            transform.rotation = Quaternion.Euler(0f, rot, 0f);
         }
 
-        // ── Impulso de agua ───────────────────
-        if (impulsoActivo)
-        {
-            impulsoActivo = false;
-            if (gestorRecursos != null && gestorRecursos.Consumir(TipoRecurso.Agua, aguaPorImpulso))
-            {
-                velocidadVertical = fuerzaImpulsoAgua;
-                saltandoArriba    = true;
-                Debug.Log("¡Impulso de agua!");
-            }
-        }
+        if (moveDir.sqrMagnitude < 0.0001f) moveDir = Vector3.zero;
 
-        // ── Gravedad diferenciada ─────────────
-        if (!enSuelo)
-        {
-            float g = (velocidadVertical > 0f) ? gravedad : gravedad_Caida;
-            velocidadVertical += g * Time.deltaTime;
+        controller.Move(
+            moveDir    * (_speed            * Time.deltaTime) +
+            Vector3.up * (_verticalVelocity * Time.deltaTime)
+        );
 
-            // Si está subiendo y soltó el botón, saltandoArriba se gestiona arriba
-            if (velocidadVertical < 0f)
-                saltandoArriba = false;
-        }
-
-        // ── Movimiento horizontal ─────────────
-        // Leemos el YawAngle directamente desde TerceraPersonaCamara
-        // porque LookAt sobreescribe eulerAngles y no podemos fiarnos de él
-        float yaw = camaraScript != null ? camaraScript.YawAngle : camara.eulerAngles.y;
-        Quaternion camYaw     = Quaternion.Euler(0f, yaw, 0f);
-        Vector3 camaraForward = camYaw * Vector3.forward;
-        Vector3 camaraRight   = camYaw * Vector3.right;
-
-        Vector3 direccion = camaraForward * inputMovimiento.y
-                          + camaraRight   * inputMovimiento.x;
-
-        // Línea verde en Scene que muestra hacia dónde va el jugador
-        Debug.DrawRay(transform.position + Vector3.up, direccion * 2f, Color.green);
-
-        float velObjetivo = corriendo ? velocidadCorrer : velocidadAndar;
-        Vector3 objetivoHorizontal = direccion.normalized * (direccion.magnitude > 0.1f ? velObjetivo : 0f);
-
-        // Escoger tasa: acelerar si hay input, frenar si no
-        float tasa = (direccion.magnitude > 0.1f) ? aceleracion : deceleracion;
-        velocidadHorizontal = Vector3.MoveTowards(velocidadHorizontal, objetivoHorizontal, tasa * Time.deltaTime);
-
-        // ── Rotación suave hacia donde se mueve ─
-        if (velocidadHorizontal.magnitude > 0.1f)
-        {
-            Quaternion rotObjetivo = Quaternion.LookRotation(velocidadHorizontal.normalized);
-            transform.rotation = Quaternion.Slerp(transform.rotation, rotObjetivo, 15f * Time.deltaTime);
-        }
-
-        // ── Aplicar movimiento total ──────────
-        Vector3 movimientoTotal = velocidadHorizontal + Vector3.up * velocidadVertical;
-        controller.Move(movimientoTotal * Time.deltaTime);
-
-        enSueloFrame = enSuelo;
+        disparandoActivo = false;
     }
 
-    // ══════════════════════════════════════════
-    // SALTAR
-    // ══════════════════════════════════════════
-    void Saltar(float altura)
+    void JumpAndGravity()
     {
-        // v = sqrt(2 * |g| * h)
-        velocidadVertical = Mathf.Sqrt(2f * Mathf.Abs(gravedad) * altura);
-        saltandoArriba    = true;
+        if (enSuelo)
+        {
+            _fallTimeoutDelta = timeoutCaida;
+
+            if (_verticalVelocity < 0f)
+                _verticalVelocity = -2f;
+
+            if (jumpAction.WasPressedThisFrame() && _jumpTimeoutDelta <= 0f)
+                _verticalVelocity = Mathf.Sqrt(alturasSalto * -2f * gravedad);
+
+            if (_jumpTimeoutDelta >= 0f)
+                _jumpTimeoutDelta -= Time.deltaTime;
+        }
+        else
+        {
+            _jumpTimeoutDelta = timeoutSalto;
+            if (_fallTimeoutDelta >= 0f)
+                _fallTimeoutDelta -= Time.deltaTime;
+        }
+
+        if (impulsoActivo && recursos.Consumir(TipoRecurso.Agua, consumoAgua * Time.deltaTime))
+            _verticalVelocity = fuerzaImpulso;
+
+        if (_verticalVelocity < _terminalVelocity)
+            _verticalVelocity += gravedad * Time.deltaTime;
+
+        impulsoActivo = false;
     }
 
-    // ══════════════════════════════════════════
-    // API PÚBLICA (para JugadorCombate)
-    // ══════════════════════════════════════════
+    public void SetImpulsoMantenido(bool activo) => impulsoActivo    = activo;
+    public void SetDisparando(bool activo)        => disparandoActivo = activo;
 
-    /// <summary>Activa un impulso vertical consumiendo agua. Llamar desde JugadorCombate.</summary>
-    public void ActivarImpulsoAgua() => impulsoActivo = true;
+    void OnDrawGizmosSelected()
+    {
+        // Esfera de detección de suelo
+        Gizmos.color = enSuelo ? new Color(0f, 1f, 0f, 0.35f) : new Color(1f, 0f, 0f, 0.35f);
+        Gizmos.DrawSphere(
+            new Vector3(transform.position.x, transform.position.y - offsetSuelo, transform.position.z),
+            radioSuelo);
 
-    /// <summary>Devuelve si el jugador está en el suelo.</summary>
-    public bool EstaEnSuelo() => controller.isGrounded;
+        // Flecha hacia donde mira el jugador
+        Vector3 origen = transform.position + Vector3.up * 1f;
+        Vector3 dir    = transform.forward;
+        float   largo  = 2f;
 
-    /// <summary>Velocidad horizontal actual (útil para animaciones).</summary>
-    public float VelocidadHorizontal() => velocidadHorizontal.magnitude;
+        Gizmos.color = Color.blue;
+        Gizmos.DrawLine(origen, origen + dir * largo);
+
+        // Punta de la flecha
+        Vector3 punta     = origen + dir * largo;
+        Vector3 derechaAla = Quaternion.Euler(0, 30, 0) * (-dir) * 0.4f;
+        Vector3 izqAla    = Quaternion.Euler(0, -30, 0) * (-dir) * 0.4f;
+        Gizmos.DrawLine(punta, punta + derechaAla);
+        Gizmos.DrawLine(punta, punta + izqAla);
+    }
 }
