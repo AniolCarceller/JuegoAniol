@@ -15,19 +15,23 @@ public class EnemyAI : MonoBehaviour
     public float vidaMaxima           = 50f;
     public float vidaActual;
     public float dañoAtaque           = 10f;
-    public float velocidadNormal      = 6f;    // antes 3.5 — patrulla ágil
-    public float velocidadPersecucion = 10f;   // antes 5.5 — persecución que se nota
+    public float velocidadNormal      = 10f;
+    public float velocidadPersecucion = 16f;
 
     [Header("Detección")]
-    public float rangoDeteccion     = 12f;   // antes 8 — ve al jugador desde más lejos
+    public float rangoDeteccion     = 25f;
     public float rangoAtaque        = 1.8f;
-    public float tiempoEntreAtaques = 1.2f;  // antes 1.5 — ataca un poco más rápido
+    public float tiempoEntreAtaques = 1.2f;
+
+    [Header("Raycast de visión")]
+    public float alturaRaycast = 1f;   // ← CORREGIDO: variable que faltaba
 
     [Header("Wander")]
-    public float radioWander = 8f;           // antes 6 — deambula más
+    public float radioWander = 15f;
 
     [Header("Estado (debug)")]
     [SerializeField] protected EstadoEnemigo estado = EstadoEnemigo.Idle;
+    public EstadoEnemigo EstadoActual => estado;
 
     [HideInInspector] public FocoIncendio focoOrigen;
     [HideInInspector] public bool         esDefensor = false;
@@ -55,8 +59,8 @@ public class EnemyAI : MonoBehaviour
         }
 
         agente.speed        = velocidadNormal;
-        agente.acceleration = 20f;   // arranca rápido, sin deslizamiento
-        agente.angularSpeed = 300f;  // gira rápido para no dar vueltas lentas
+        agente.acceleration = 20f;
+        agente.angularSpeed = 300f;
         CambiarEstado(EstadoEnemigo.Wander);
     }
 
@@ -130,6 +134,10 @@ public class EnemyAI : MonoBehaviour
         }
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // ESTADOS
+    // ─────────────────────────────────────────────────────────────────────────
+
     void EstadoIdle()
     {
         timerIdle -= Time.deltaTime;
@@ -141,7 +149,7 @@ public class EnemyAI : MonoBehaviour
         if (!agente.isActiveAndEnabled || !agente.isOnNavMesh) return;
         if (agente.remainingDistance < 0.5f)
         {
-            timerIdle = Random.Range(0.5f, 1.5f); // pausa más corta entre wanderes
+            timerIdle = Random.Range(0.5f, 1.5f);
             CambiarEstado(EstadoEnemigo.Idle);
         }
     }
@@ -188,25 +196,37 @@ public class EnemyAI : MonoBehaviour
             CambiarEstado(EstadoEnemigo.Wander);
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // VISIÓN
+    // ─────────────────────────────────────────────────────────────────────────
+
     bool ComprobarVision()
     {
         if (jugador == null) return false;
         float distancia = Vector3.Distance(transform.position, jugador.position);
         if (distancia > rangoDeteccion) return false;
 
-        Vector3 origen = transform.position + Vector3.up * 0.8f;
-        Vector3 dir    = (jugador.position + Vector3.up * 0.8f - origen).normalized;
+        Vector3 origen = transform.position + Vector3.up * alturaRaycast;
+        Vector3 dest   = jugador.position   + Vector3.up * alturaRaycast;
+        Vector3 dir    = (dest - origen).normalized;
 
-        if (Physics.Raycast(origen, dir, out RaycastHit hit, rangoDeteccion))
+        int mask = ~LayerMask.GetMask("Enemies");
+
+        if (Physics.Raycast(origen, dir, out RaycastHit hit, rangoDeteccion, mask))
             return hit.transform == jugador || hit.transform.IsChildOf(jugador);
 
-        return false;
+        return true;
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // COMBATE
+    // ─────────────────────────────────────────────────────────────────────────
 
     protected virtual void AtacarJugador()
     {
         float daño = esMayor ? dañoAtaque * 1.5f : dañoAtaque;
         jugadorVida?.RecibirDaño(daño);
+
         Debug.Log($"{gameObject.name} ataca por {daño}");
     }
 
@@ -241,6 +261,10 @@ public class EnemyAI : MonoBehaviour
             CambiarEstado(EstadoEnemigo.ChasePlayer);
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // CAMBIO DE ESTADO
+    // ─────────────────────────────────────────────────────────────────────────
+
     protected void CambiarEstado(EstadoEnemigo nuevo)
     {
         estado = nuevo;
@@ -274,15 +298,17 @@ public class EnemyAI : MonoBehaviour
         return transform.position;
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // GIZMOS
+    // ─────────────────────────────────────────────────────────────────────────
+
     void OnDrawGizmosSelected()
     {
-        // Rangos
         Gizmos.color = Color.yellow;
         Gizmos.DrawWireSphere(transform.position, rangoDeteccion);
         Gizmos.color = Color.red;
         Gizmos.DrawWireSphere(transform.position, rangoAtaque);
 
-        // Flecha hacia donde mira el enemigo
         Vector3 origen = transform.position + Vector3.up * 1f;
         Vector3 dir    = transform.forward;
         float   largo  = 2f;
@@ -296,7 +322,6 @@ public class EnemyAI : MonoBehaviour
         Gizmos.DrawLine(punta, punta + derechaAla);
         Gizmos.DrawLine(punta, punta + izqAla);
 
-        // Línea hacia el jugador si está en chase o ataque (solo en Play)
         if (Application.isPlaying && jugador != null)
         {
             Gizmos.color = (estado == EstadoEnemigo.ChasePlayer || estado == EstadoEnemigo.Attack)
